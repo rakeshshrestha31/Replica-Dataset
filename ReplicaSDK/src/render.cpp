@@ -6,6 +6,17 @@
 #include "GLCheck.h"
 #include "MirrorRenderer.h"
 
+#include <fstream>
+
+Eigen::Matrix4d load_extrinsic(char filename[]) {
+    std::ifstream f(filename);
+    double x[16];
+    int i = 0;
+    while (f >> x[i++]) {}
+
+    Eigen::Matrix4d m= Eigen::Map<Eigen::Matrix4d>(x, 4, 4);
+    return m.transpose();
+}
 
 int main(int argc, char* argv[]) {
   ASSERT(argc == 3 || argc == 4, "Usage: ./ReplicaRenderer mesh.ply /path/to/atlases [mirrorFile]");
@@ -26,11 +37,22 @@ int main(int argc, char* argv[]) {
   bool renderDepth = true;
   float depthScale = 65535.0f * 0.1f;
 
+  auto fx = width / 2.0f;
+  auto fy = width / 2.0f;
+  auto cx = (width - 1.0f) / 2.0f;
+  auto cy = (height - 1.0f) / 2.0f;
+  auto near = 0.1f;
+  auto far = 100.0f;
+
+  Eigen::IOFormat matrix_fmt(
+      Eigen::StreamPrecision, Eigen::DontAlignCols, " ", "\n", "", ""
+  );
+
   // Setup EGL
   EGLCtx egl;
 
   egl.PrintInformation();
-  
+
   if(!checkGLVersion()) {
     return 1;
   }
@@ -47,17 +69,32 @@ int main(int argc, char* argv[]) {
   pangolin::GlTexture depthTexture(width, height, GL_R32F, false, 0, GL_RED, GL_FLOAT, 0);
   pangolin::GlFramebuffer depthFrameBuffer(depthTexture, renderBuffer);
 
+  pangolin::OpenGlMatrixSpec proj_mat = pangolin::ProjectionMatrixRDF_BottomLeft(
+      width,
+      height,
+      fx, fy,
+      cx, cy,
+      near, far);
+
+  char filename[1000] = "projection.txt";
+  {
+    std::ofstream projection_file(filename);
+    projection_file << Eigen::Matrix4d(proj_mat).format(matrix_fmt);
+  }
+
+  sprintf(filename, "intrinsics.txt");
+  {
+    std::ofstream intrinsics_file(filename);
+    intrinsics_file
+        << fx << " " << fy << " "
+        << cx << " " << cy << " "
+        << width << " " << height << " "
+        << near << " " << far;
+  }
+
   // Setup a camera
   pangolin::OpenGlRenderState s_cam(
-      pangolin::ProjectionMatrixRDF_BottomLeft(
-          width,
-          height,
-          width / 2.0f,
-          width / 2.0f,
-          (width - 1.0f) / 2.0f,
-          (height - 1.0f) / 2.0f,
-          0.1f,
-          100.0f),
+      proj_mat,
       pangolin::ModelViewLookAtRDF(0, 0, 4, 0, 0, 0, 0, 1, 0));
 
   // Start at some origin
@@ -92,10 +129,13 @@ int main(int argc, char* argv[]) {
   pangolin::ManagedImage<uint16_t> depthImageInt(width, height);
 
   // Render some frames
-  const size_t numFrames = 100;
+  const size_t numFrames = 64;
   for (size_t i = 0; i < numFrames; i++) {
     std::cout << "\rRendering frame " << i + 1 << "/" << numFrames << "... ";
     std::cout.flush();
+
+    snprintf(filename, 1000, "/tmp/extrinsic_%06zu.txt", i);
+    s_cam.GetModelViewMatrix() = load_extrinsic(filename);
 
     // Render
     frameBuffer.Bind();
@@ -131,13 +171,22 @@ int main(int argc, char* argv[]) {
     // Download and save
     render.Download(image.ptr, GL_RGB, GL_UNSIGNED_BYTE);
 
-    char filename[1000];
-    snprintf(filename, 1000, "frame%06zu.jpg", i);
+    snprintf(filename, 1000, "%06zu.jpg", i);
 
     pangolin::SaveImage(
         image.UnsafeReinterpret<uint8_t>(),
         pangolin::PixelFormatFromString("RGB24"),
         std::string(filename));
+
+    snprintf(filename, 1000, "pose%06zu.txt", i);
+    std::ofstream pose_file(filename);
+    pose_file << Eigen::Matrix4d(s_cam.GetModelViewMatrix()).format(matrix_fmt);
+    pose_file.close();
+
+    // snprintf(filename, 1000, "projection%06zu.txt", i);
+    // std::ofstream projection_file(filename);
+    // projection_file << Eigen::Matrix4d(s_cam.GetProjectionMatrix()).format(matrix_fmt);
+    // projection_file.close();
 
     if (renderDepth) {
       // render depth
@@ -169,9 +218,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Move the camera
-    T_camera_world = T_camera_world * T_new_old.inverse();
+    // T_camera_world = T_camera_world * T_new_old.inverse();
 
-    s_cam.GetModelViewMatrix() = T_camera_world;
+    // s_cam.GetModelViewMatrix() = T_camera_world;
   }
   std::cout << "\rRendering frame " << numFrames << "/" << numFrames << "... done" << std::endl;
 
