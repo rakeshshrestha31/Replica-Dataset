@@ -2,10 +2,15 @@ import sys
 from pathlib import Path
 from tqdm import  tqdm
 import typing
+from copy import deepcopy
 
 import open3d as o3d
 import cv2
 import numpy as np
+
+import sys
+sys.path.append(Path(__file__).resolve())
+from utils import correct_rotation
 
 
 def get_camera_pose(eye, center, up=[0, 0, 1]):
@@ -28,7 +33,9 @@ def get_camera_pose(eye, center, up=[0, 0, 1]):
 
 
 def spherical_to_cartesian(
-        r: typing.Union[np.ndarray, float],
+        rx: typing.Union[np.ndarray, float],
+        ry: typing.Union[np.ndarray, float],
+        rz: typing.Union[np.ndarray, float],
         theta: typing.Union[np.ndarray, float],
         phi: typing.Union[np.ndarray, float],
 ) -> np.ndarray:
@@ -37,68 +44,78 @@ def spherical_to_cartesian(
     y-axis: front (traditionally x)
     x-axis: right (traditionally y)
     """
-    # our phi is 0 along z plane (front of the object)
-    # but 0 should be along the vertical axis (here y) by default
+    # our phi is 0 along y plane (front of the object)
+    # but 0 should be along the vertical axis (here z) by default
     phi += np.pi / 2.0
-    # y here is the the vertical axis (not z)
-    z = np.asarray(r * np.cos(phi)).reshape((-1, 1))
-    x = np.asarray(r * np.sin(phi) * np.cos(theta)).reshape((-1, 1))
-    y = np.asarray(r * np.sin(phi) * np.sin(theta)).reshape((-1, 1))
+    z = np.asarray(rz * np.cos(phi)).reshape((-1, 1))
+    x = np.asarray(rx * np.sin(phi) * np.cos(theta)).reshape((-1, 1))
+    y = np.asarray(ry * np.sin(phi) * np.sin(theta)).reshape((-1, 1))
     return np.concatenate((x, y, z), axis=-1)
 
 
-def generate_trajectory(num_poses=64):
+def generate_trajectory(rx, ry, rz):
     # lookat_point = (4.0, 1., -0.4)
-    lookat_point = (3.25, -1.3, -1.5)
+    # lookat_point = (2.75, -1.1, -1.2)
 
-    max_dist_to_object = 2.75
-    min_dist_to_object = 0.75
+    # looking at origin. Trajectory will be transformed later
+    lookat_point = (0.0, 0.0, 0.0)
 
-    max_phi_to_object = np.deg2rad(45)
-    del_theta_min = np.deg2rad(15)
-    del_theta_max = np.deg2rad(45)
+    # rx = 2.5
+    # ry = 1.5
+    # rz = 1.3
 
-    theta = 0.0
+    thetas = [np.deg2rad(i) for i in np.linspace(10, 350, 25)]
+    phis = [np.deg2rad(i) for i in np.linspace(-25, 25, 3)]
+    thetas, phis = np.meshgrid(thetas, phis)
+    thetas = thetas.reshape((-1,)).tolist()
+    phis = phis.reshape((-1,)).tolist()
+
     poses = []
 
-    for pose_idx in range(num_poses):
-        del_theta = np.random.uniform(del_theta_min, del_theta_max)
-        theta += del_theta
-
+    # for pose_idx in range(num_poses):
+    for theta, phi in zip(thetas, phis):
         # [0, 2 pi]
         theta = (theta % (2 * np.pi))
 
-        # phi = np.random.uniform(0.0, 1.0) * max_phi_to_object
-        # r = np.random.random() * max_dist_to_object
-        # cartesian_coords = spherical_to_cartesian(r=r, theta=theta, phi=phi)
-        # cartesian_coords = cartesian_coords.reshape((-1,))
-        # assert(cartesian_coords.shape[0] == 3)
+        # rx_ = rx + (np.random.random() * del_x_max)
+        # ry_ = ry + (np.random.random() * del_y_max)
+        # rz_ = rz + (np.random.random() * del_z_max)
 
-        r1 = 2.1 + (np.random.random() * 0.1)
-        r2 = 1.2 + (np.random.random() * 0.015)
-        z = 0.5 + (np.random.random() * 0.5)
-
-        cartesian_coords = [
-            r1 * np.cos(theta),
-            r2 * np.sin(theta),
-            z
-        ]
+        cartesian_coords = spherical_to_cartesian(rx, ry, rz, theta, phi)
+        cartesian_coords = cartesian_coords.reshape((-1,))
 
         # (x, y, z) in world coords
         x = cartesian_coords[0] + lookat_point[0]
         y = cartesian_coords[1] + lookat_point[1]
         z = cartesian_coords[2] + lookat_point[2]
 
-        poses.append(get_camera_pose((x, y, z), lookat_point))
+        pose = get_camera_pose((x, y, z), lookat_point)
+        poses.append(pose)
 
     return poses
 
 
-def get_extrinsics():
+def get_extrinsics(roi):
     extrinsics = []
-
-    poses = generate_trajectory()
     mesh = o3d.geometry.TriangleMesh()
+
+    extent = roi['extent'].copy()
+    extent[0] *= 0.8
+    extent[1] *= 1.1
+
+    # look at point slightly higher
+    t = roi['centroid']
+    t[2] += 0.5
+
+    R = roi['R']
+
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, -1] = t
+
+    poses = generate_trajectory(*(extent.tolist()))
+    poses = [T @ i for i in poses]
+
     for i, pose in enumerate(poses):
         mesh += (
             o3d.geometry.TriangleMesh.create_coordinate_frame()
@@ -108,26 +125,43 @@ def get_extrinsics():
         extrinsic = np.linalg.inv(pose)
         extrinsics.append(extrinsic)
         np.savetxt(f'/tmp/extrinsic_{i:06d}.txt', extrinsic.reshape((-1,)))
-    o3d.io.write_triangle_mesh('/tmp/poses.ply', mesh)
 
-    # for i in range(64):
-    #     extrinsics.append(np.loadtxt(f'/tmp/extrinsic_{i:06d}.txt').reshape(4, 4))
+    # poses = []
+    # for i in range(75):
+    #     extrinsic = np.loadtxt(f'/tmp/extrinsic_{i:06d}.txt').reshape(4, 4)
+    #     pose = np.linalg.inv(extrinsic)
+    #     extrinsics.append(extrinsic)
+    #     poses.append(pose)
+    #     mesh += (
+    #         o3d.geometry.TriangleMesh.create_coordinate_frame()
+    #         .scale(0.25, [0.0]*3)
+    #         .transform(pose)
+    #     )
+
+    o3d.io.write_triangle_mesh('/tmp/poses.ply', mesh)
 
     return extrinsics
 
 
-def find_scale_matrix(model_file):
-    o3d_mesh = o3d.io.read_triangle_mesh(str(model_file), True)
-    # o3d_mesh = o3d.io.read_point_cloud(str(model_file))
-    o3d_mesh.remove_non_manifold_edges()
+def find_scale_matrix(sel_model_file, full_model_file):
+    sel_o3d_mesh = o3d.io.read_triangle_mesh(str(sel_model_file), True)
+    sel_o3d_mesh.remove_non_manifold_edges()
 
-    centroid = o3d_mesh.get_center()
-    aabb = o3d_mesh.get_axis_aligned_bounding_box()
+    full_o3d_mesh = o3d.io.read_triangle_mesh(str(full_model_file)) # , True)
+    # full_o3d_mesh.remove_non_manifold_edges()
+
+    obb = sel_o3d_mesh.get_oriented_bounding_box()
+    R = correct_rotation(obb.R)
+
+    centroid = sel_o3d_mesh.get_center()
+    aabb = deepcopy(sel_o3d_mesh).rotate(R.T).get_axis_aligned_bounding_box()
+    aabb_extents = aabb.get_extent().reshape((-1,))
     # add some slack to extent to avoid clipping around the boundary
-    extent = np.max(aabb.get_extent().reshape((-1,))) # * 1.2
+    extent = np.max(aabb_extents) * 1.2
 
     scale_matrix = np.eye(4)
     scale_matrix[:3, 3] = centroid
+    scale_matrix[:3, :3] = R
 
     # range [-0.5, 0.5]
     # new_extent = 1.0
@@ -135,10 +169,24 @@ def find_scale_matrix(model_file):
     # range [-1.0, 1.0]
     new_extent = 2.0
 
-    scale_matrix[0, 0] = scale_matrix[1, 1] = scale_matrix[2, 2] = extent / new_extent
+    scale = extent / new_extent
+    scale_matrix[:3, :3] *= scale
+
+    inv_scale_matrix = np.linalg.inv(scale_matrix)
+    mesh1 = sel_o3d_mesh.transform(inv_scale_matrix)
+    mesh2 = full_o3d_mesh.transform(inv_scale_matrix)
+
+    o3d.io.write_triangle_mesh('/tmp/scaled_mesh_sel.ply', mesh1)
+    o3d.io.write_triangle_mesh('/tmp/scaled_mesh_full.ply', mesh2)
 
     print('scale_matrix\n', scale_matrix)
-    return scale_matrix
+
+    return {
+        'scale_matrix': scale_matrix,
+        'R': R,
+        'centroid': centroid,
+        'extent': aabb_extents
+    }
 
 
 def get_projection_matrix(K, extrinsic):
@@ -148,9 +196,11 @@ def get_projection_matrix(K, extrinsic):
     return proj_mat
 
 
-def save_idr_format(dataset_root, model_file, K):
-    extrinsics = get_extrinsics()
-    scale_matrix = find_scale_matrix(model_file)
+def save_idr_format(dataset_root, sel_model_file, full_model_file, K):
+    out = find_scale_matrix(sel_model_file, full_model_file)
+    scale_matrix = out['scale_matrix']
+
+    extrinsics = get_extrinsics(out)
 
     proj_matrices = [
         get_projection_matrix(K, extrinsic)
@@ -171,10 +221,26 @@ def save_idr_format(dataset_root, model_file, K):
     cameras_file = '/tmp/cameras.npz'
     np.savez(str(cameras_file), **cameras)
 
+    viz_scaled_cameras(extrinsics, scale_matrix)
+
+
+def viz_scaled_cameras(extrinsics, scale_matrix):
+    mesh = o3d.geometry.TriangleMesh()
+    for Tcw in extrinsics:
+        Tcw = Tcw @ scale_matrix
+        Twc = np.linalg.inv(Tcw)
+        mesh += (
+            o3d.geometry.TriangleMesh.create_coordinate_frame()
+            .scale(0.2, [0.0]*3)
+            .transform(Twc)
+        )
+    o3d.io.write_triangle_mesh('/tmp/scale_poses.ply', mesh)
+
 
 if __name__ == '__main__':
     dataset_root = Path(sys.argv[1])
-    model_file = Path(sys.argv[2])
+    sel_model_file = Path(sys.argv[2])
+    full_model_file = Path(sys.argv[3])
 
     intrinsic_file = dataset_root / 'intrinsics.txt'
     fx, fy, cx, cy, width, height, near, far = np.loadtxt(intrinsic_file).tolist()
@@ -185,10 +251,10 @@ if __name__ == '__main__':
         0, 0, 1
    ]).reshape((3, 3))
 
-    save_idr_format(dataset_root, model_file, K)
+    save_idr_format(dataset_root, sel_model_file, full_model_file, K)
     exit(0)
 
-    num_images = 64
+    num_images = 75
     depth_scale = 65535.0 * 0.1
 
     intrinsics = o3d.camera.PinholeCameraIntrinsic(
