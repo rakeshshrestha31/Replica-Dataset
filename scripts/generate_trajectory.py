@@ -3,6 +3,7 @@ from pathlib import Path
 from tqdm import  tqdm
 import typing
 from copy import deepcopy
+import re
 
 import open3d as o3d
 import cv2
@@ -64,8 +65,11 @@ def generate_trajectory(rx, ry, rz):
     # ry = 1.5
     # rz = 1.3
 
-    thetas = [np.deg2rad(i) for i in np.linspace(10, 350, 25)]
-    phis = [np.deg2rad(i) for i in np.linspace(-25, 25, 3)]
+    # thetas = [np.deg2rad(i) for i in np.linspace(10, 350, 40)]
+    # phis = [np.deg2rad(i) for i in np.linspace(-40, 40, 4)]
+
+    thetas = [np.deg2rad(i) for i in np.linspace(10, 350, 26)]
+    phis = [0]
     thetas, phis = np.meshgrid(thetas, phis)
     thetas = thetas.reshape((-1,)).tolist()
     phis = phis.reshape((-1,)).tolist()
@@ -92,6 +96,16 @@ def generate_trajectory(rx, ry, rz):
         pose = get_camera_pose((x, y, z), lookat_point)
         poses.append(pose)
 
+    del_z = rz / 2.0
+    del_zs = [del_z, -del_z]
+    num_base_poses = len(poses)
+
+    for del_z in del_zs:
+        for i in range(num_base_poses):
+            pose = poses[i].copy()
+            pose[2, 3] += del_z
+            poses.append(pose)
+
     return poses
 
 
@@ -105,7 +119,7 @@ def get_extrinsics(roi):
 
     # look at point slightly higher
     t = roi['centroid']
-    t[2] += 0.5
+    t[2] += 0.3
 
     R = roi['R']
 
@@ -147,15 +161,24 @@ def find_scale_matrix(sel_model_file, full_model_file):
     sel_o3d_mesh = o3d.io.read_triangle_mesh(str(sel_model_file), True)
     sel_o3d_mesh.remove_non_manifold_edges()
 
-    full_o3d_mesh = o3d.io.read_triangle_mesh(str(full_model_file)) # , True)
+    full_o3d_mesh = o3d.io.read_point_cloud(str(full_model_file)) # , True)
+    # full_o3d_mesh = o3d.io.read_triangle_mesh(str(full_model_file)) # , True)
     # full_o3d_mesh.remove_non_manifold_edges()
 
+    ## sel_mesh for scale
     obb = sel_o3d_mesh.get_oriented_bounding_box()
     R = correct_rotation(obb.R)
-
     centroid = sel_o3d_mesh.get_center()
     aabb = deepcopy(sel_o3d_mesh).rotate(R.T).get_axis_aligned_bounding_box()
     aabb_extents = aabb.get_extent().reshape((-1,))
+
+    ## full_mesh for scale
+    # obb = full_o3d_mesh.get_oriented_bounding_box()
+    # R = correct_rotation(obb.R)
+    # centroid = full_o3d_mesh.get_center()
+    # aabb = deepcopy(full_o3d_mesh).rotate(R.T).get_axis_aligned_bounding_box()
+    # aabb_extents = aabb.get_extent().reshape((-1,))
+
     # add some slack to extent to avoid clipping around the boundary
     extent = np.max(aabb_extents) * 1.2
 
@@ -172,12 +195,21 @@ def find_scale_matrix(sel_model_file, full_model_file):
     scale = extent / new_extent
     scale_matrix[:3, :3] *= scale
 
+    ## sel_mesh for generating trajectory later
+    centroid = sel_o3d_mesh.get_center()
+    aabb = deepcopy(sel_o3d_mesh).rotate(R.T).get_axis_aligned_bounding_box()
+    aabb_extents = aabb.get_extent().reshape((-1,))
+
+    # debug
     inv_scale_matrix = np.linalg.inv(scale_matrix)
     mesh1 = sel_o3d_mesh.transform(inv_scale_matrix)
     mesh2 = full_o3d_mesh.transform(inv_scale_matrix)
 
     o3d.io.write_triangle_mesh('/tmp/scaled_mesh_sel.ply', mesh1)
-    o3d.io.write_triangle_mesh('/tmp/scaled_mesh_full.ply', mesh2)
+    # o3d.io.write_triangle_mesh('/tmp/scaled_mesh_full.ply', mesh2)
+
+    # o3d.io.write_point_cloud('/tmp/scaled_mesh_sel.ply', mesh1)
+    o3d.io.write_point_cloud('/tmp/scaled_mesh_full.ply', mesh2)
 
     print('scale_matrix\n', scale_matrix)
 
@@ -234,7 +266,32 @@ def viz_scaled_cameras(extrinsics, scale_matrix):
             .scale(0.2, [0.0]*3)
             .transform(Twc)
         )
-    o3d.io.write_triangle_mesh('/tmp/scale_poses.ply', mesh)
+    o3d.io.write_triangle_mesh('/tmp/scaled_poses.ply', mesh)
+
+
+def get_num_images(dataset_root):
+    rgb_indices = set()
+    depth_indices = set()
+    pose_indices = set()
+
+    for filepath in dataset_root.iterdir():
+        if not filepath.is_file():
+            continue
+        filename = filepath.name
+        if filename.endswith('.jpg'):
+            idx = int(filename.split('.')[0])
+            rgb_indices.add(idx)
+
+        if filename.startswith('depth') and filename.endswith('.png'):
+            idx = int(re.findall(r'\d+', filename)[0])
+            depth_indices.add(idx)
+
+        if filename.startswith('pose') and filename.endswith('.txt'):
+            idx = int(re.findall(r'\d+', filename)[0])
+            pose_indices.add(idx)
+
+    indices = rgb_indices.intersection(depth_indices).intersection(pose_indices)
+    return len(indices)
 
 
 if __name__ == '__main__':
@@ -254,7 +311,8 @@ if __name__ == '__main__':
     save_idr_format(dataset_root, sel_model_file, full_model_file, K)
     exit(0)
 
-    num_images = 75
+    num_images = get_num_images(dataset_root)
+    print(f'{num_images=}')
     depth_scale = 65535.0 * 0.1
 
     intrinsics = o3d.camera.PinholeCameraIntrinsic(
@@ -277,7 +335,7 @@ if __name__ == '__main__':
             .transform(T_world_cam)
         )
 
-        o3d.io.write_triangle_mesh(f'/tmp/coord_{image_idx}.ply', coord_frame)
+        # o3d.io.write_triangle_mesh(f'/tmp/coord_{image_idx}.ply', coord_frame)
 
         depth = (
             cv2.imread(str(depth_file), cv2.IMREAD_ANYDEPTH)
