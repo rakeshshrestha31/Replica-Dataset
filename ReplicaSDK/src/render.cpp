@@ -18,17 +18,42 @@ Eigen::Matrix4d load_extrinsic(char filename[]) {
     return m.transpose();
 }
 
-int main(int argc, char* argv[]) {
-  ASSERT(argc == 3 || argc == 4, "Usage: ./ReplicaRenderer mesh.ply /path/to/atlases [mirrorFile]");
+pangolin::ManagedImage<uint8_t> depthToMask(
+    const pangolin::ManagedImage<uint16_t> & depth_image
+) {
+    pangolin::ManagedImage<uint8_t> mask_image(
+        (size_t)depth_image.w, (size_t)depth_image.h
+        // (size_t)pangolin::PixelFormatFromString("GRAY8")
+    );
 
-  const std::string meshFile(argv[1]);
-  const std::string atlasFolder(argv[2]);
+    uint16_t *depth_ptr = depth_image.ptr;
+    // Iterate over each pixel in the depth image and set the corresponding pixel in the mask image
+    for (size_t y = 0; y < depth_image.h; ++y) {
+        for (size_t x = 0; x < depth_image.w; ++x) {
+            auto depth = static_cast<uint16_t>(depth_ptr[y * mask_image.pitch + x]);
+            if (depth > 0) {
+                mask_image.ptr[y * mask_image.pitch + x] = 255;
+            } else {
+                mask_image.ptr[y * mask_image.pitch + x] = 0;
+            }
+        }
+    }
+
+    return mask_image;
+}
+
+int main(int argc, char* argv[]) {
+  ASSERT(argc == 4 || argc == 5, "Usage: ./ReplicaRenderer numFrames mesh.ply /path/to/atlases [mirrorFile]");
+
+  const size_t numFrames = std::stoi(argv[1]);
+  const std::string meshFile(argv[2]);
+  const std::string atlasFolder(argv[3]);
   ASSERT(pangolin::FileExists(meshFile));
   ASSERT(pangolin::FileExists(atlasFolder));
 
   std::string surfaceFile;
-  if (argc == 4) {
-    surfaceFile = std::string(argv[3]);
+  if (argc == 5) {
+    surfaceFile = std::string(argv[4]);
     ASSERT(pangolin::FileExists(surfaceFile));
   }
 
@@ -98,12 +123,12 @@ int main(int argc, char* argv[]) {
       pangolin::ModelViewLookAtRDF(0, 0, 4, 0, 0, 0, 0, 1, 0));
 
   // Start at some origin
-  Eigen::Matrix4d T_camera_world = s_cam.GetModelViewMatrix();
+  // Eigen::Matrix4d T_camera_world = s_cam.GetModelViewMatrix();
 
   // And move to the left
-  Eigen::Matrix4d T_new_old = Eigen::Matrix4d::Identity();
+  // Eigen::Matrix4d T_new_old = Eigen::Matrix4d::Identity();
 
-  T_new_old.topRightCorner(3, 1) = Eigen::Vector3d(0.025, 0, 0);
+  // T_new_old.topRightCorner(3, 1) = Eigen::Vector3d(0.025, 0, 0);
 
   // load mirrors
   std::vector<MirrorSurface> mirrors;
@@ -129,7 +154,6 @@ int main(int argc, char* argv[]) {
   pangolin::ManagedImage<uint16_t> depthImageInt(width, height);
 
   // Render some frames
-  const size_t numFrames = 75;
   for (size_t i = 0; i < numFrames; i++) {
     std::cout << "\rRendering frame " << i + 1 << "/" << numFrames << "... ";
     std::cout.flush();
@@ -215,6 +239,14 @@ int main(int argc, char* argv[]) {
           depthImageInt.UnsafeReinterpret<uint8_t>(),
           pangolin::PixelFormatFromString("GRAY16LE"),
           std::string(filename), true, 34.0f);
+
+      auto mask_image = depthToMask(depthImageInt);
+
+      snprintf(filename, 1000, "mask/%06zu.png", i);
+      pangolin::SaveImage(
+          mask_image.UnsafeReinterpret<uint8_t>(),
+          pangolin::PixelFormatFromString("GRAY8"),
+          std::string(filename));
     }
 
     // Move the camera
